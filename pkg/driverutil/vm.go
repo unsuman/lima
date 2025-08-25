@@ -1,12 +1,11 @@
-// SPDX-FileCopyrightText: Copyright The Lima Authors
-// SPDX-License-Identifier: Apache-2.0
-
 package driverutil
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
 
 	"github.com/sirupsen/logrus"
 
@@ -35,7 +34,7 @@ func validateConfigAgainstDriver(y *limatype.LimaYAML, filePath, vmType string) 
 	}
 
 	if extDriver != nil {
-		return errors.New("not supported for external drivers")
+		return handlePreConfiguredDriverAction(y, extDriver.Path, filePath)
 	}
 
 	if err := intDriver.AcceptConfig(y, filePath); err != nil {
@@ -45,6 +44,48 @@ func validateConfigAgainstDriver(y *limatype.LimaYAML, filePath, vmType string) 
 		return err
 	}
 
+	return nil
+}
+
+func handlePreConfiguredDriverAction(y *limatype.LimaYAML, extDriverPath, filePath string) error {
+	cmd := exec.CommandContext(context.Background(), extDriverPath, "--pre-driver-action")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+
+	encoder := json.NewEncoder(stdin)
+	if err := encoder.Encode(limatype.PreConfiguredDriverPayload{
+		Config:   *y,
+		FilePath: filePath,
+	}); err != nil {
+		return err
+	}
+	stdin.Close()
+
+	decoder := json.NewDecoder(stdout)
+	var response limatype.PreConfiguredDriverResponse
+	if err := decoder.Decode(&response); err != nil {
+		return err
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return err
+	}
+
+	if response.Error != "" {
+		return errors.New(response.Error)
+	}
+
+	*y = response.Config
+	logrus.Debugf("Pre-configured driver action completed successfully for %q", extDriverPath)
 	return nil
 }
 
@@ -59,8 +100,58 @@ func InspectStatus(ctx context.Context, inst *limatype.Instance) (string, error)
 	}
 
 	if extDriver != nil {
-		return "", errors.New("InspectStatus is not supported for external drivers")
+		status, err := handleInspectStatusAction(inst, extDriver.Path)
+		if err != nil {
+			extDriver.Logger.Errorf("Failed to inspect status for instance %q: %v", inst.Name, err)
+			return "", err
+		}
+		extDriver.Logger.Debugf("Instance %q inspected successfully with status: %s", inst.Name, inst.Status)
+		return status, nil
 	}
 
 	return intDriver.InspectStatus(ctx, inst), nil
+}
+
+func handleInspectStatusAction(inst *limatype.Instance, extDriverPath string) (string, error) {
+	cmd := exec.CommandContext(context.Background(), extDriverPath, "--inspect-status")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return "", err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", err
+	}
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+
+	encoder := json.NewEncoder(stdin)
+	payload, err := inst.MarshalJSON()
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal instance config: %w", err)
+	}
+	if err := encoder.Encode(payload); err != nil {
+		return "", err
+	}
+	stdin.Close()
+
+	decoder := json.NewDecoder(stdout)
+	var response []byte
+	if err := decoder.Decode(&response); err != nil {
+		return "", err
+	}
+
+	var respInst limatype.Instance
+	if err := respInst.UnmarshalJSON(response); err != nil {
+		return "", fmt.Errorf("failed to unmarshal instance response: %w", err)
+	}
+
+	if err := cmd.Wait(); err != nil {
+		return "", err
+	}
+
+	*inst = respInst
+	logrus.Debugf("Inspecting instance status action completed successfully for %q", extDriverPath)
+	return inst.Status, nil
 }
