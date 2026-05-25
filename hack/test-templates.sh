@@ -397,7 +397,21 @@ if [[ -n ${CHECKS["container-engine"]} ]]; then
 	limactl shell "$NAME" $sudo $CONTAINER_ENGINE pull --quiet ${nginx_image}
 	limactl shell "$NAME" $sudo $CONTAINER_ENGINE run -d --name nginx -p 127.0.0.1:8080:80 ${nginx_image}
 
-	timeout 3m bash -euxc "until curl -f --retry 30 --retry-connrefused http://127.0.0.1:8080; do sleep 3; done"
+	if ! timeout 3m bash -euxc "until curl -f --retry 30 --retry-connrefused http://127.0.0.1:8080; do sleep 3; done"; then
+		INFO "=== DEBUG: port forwarding failed ==="
+		limactl shell "$NAME" $sudo $CONTAINER_ENGINE logs nginx || true
+		limactl shell "$NAME" ss -tlnp | grep 8080 || true
+		limactl shell "$NAME" ps aux | grep rootlesskit | grep -v grep || true
+		limactl shell "$NAME" cat /run/user/\$(id -u)/containerd-rootless/child_pid 2>/dev/null || true
+		limactl shell "$NAME" bash -c 'CHILD=$(cat /run/user/$(id -u)/containerd-rootless/child_pid 2>/dev/null) && [ -n "$CHILD" ] && nsenter -t "$CHILD" -n curl -sf --max-time 5 http://127.0.0.1:80' || true
+		limactl shell "$NAME" bash -c 'echo "shell netns: $(readlink /proc/self/ns/net)"; for p in $(pgrep -f slirp4netns); do echo "slirp4netns($p) netns: $(readlink /proc/$p/ns/net)"; done' || true
+		limactl shell "$NAME" curl -sf --max-time 5 http://127.0.0.1:8080 || true
+		limactl shell "$NAME" journalctl --user -u containerd --no-pager -n 100 || true
+		limactl shell "$NAME" bash -c 'if command -v rootlessctl >/dev/null; then rootlessctl --socket /run/user/$(id -u)/containerd-rootless/api.sock list-ports; fi' || true
+		INFO "=== END DEBUG ==="
+		ERROR "Port forwarding to nginx container on 127.0.0.1:8080 failed"
+		exit 1
+	fi
 
 	limactl shell "$NAME" $sudo $CONTAINER_ENGINE rm -f nginx
 
