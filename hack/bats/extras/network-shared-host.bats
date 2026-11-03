@@ -100,6 +100,13 @@ local_setup_file() {
         sleep 120
         limactl start "$HOST" 3>&- 4>&-
         ;;
+    vz-no-containerd)
+        # Without containerd, cidata.iso leaves out the nerdctl archive and the guests skip
+        # the containerd install. The instances start one after the other, with no wait.
+        limactl start --yes --name "$SHARED" --containerd=none --network=lima:shared template:default 3>&- 4>&-
+        date -u >"${HOME}/vmnet-evidence/first-vm-ready"
+        limactl start --yes --name "$HOST" --containerd=none --network=lima:host template:default 3>&- 4>&-
+        ;;
     *)
         ensure_instance "$SHARED"
         ensure_instance "$HOST"
